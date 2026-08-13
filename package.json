@@ -1,0 +1,40 @@
+{
+  "name": "pi-gondolin-selector",
+  "version": "0.1.0",
+  "description": "Select a local Gondolin image when Pi starts and route Pi tools into it",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "gondolin"
+  ],
+  "license": "MIT",
+  "files": [
+    "extensions",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@earendil-works/gondolin": "^0.12.0",
+    "minimatch": "^10.2.6"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  }
+}

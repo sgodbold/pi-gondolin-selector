@@ -1,0 +1,65 @@
+{
+  "imageFilter": "^(default|homelab|dbuild)-agent:",
+  "rememberByProject": true,
+  "profiles": [
+    {
+      "name": "homelab",
+      "imagePattern": "homelab-agent:*",
+      "network": {
+        "dns": {
+          "mode": "synthetic",
+          "syntheticHostMapping": "per-host"
+        },
+        "tcpHosts": {
+          "staging.internal.example.com:22": "staging.internal.example.com:22",
+          "staging:22": "staging.internal.example.com:22",
+          "testing.internal.example.com:22": "testing.internal.example.com:22",
+          "testing:22": "testing.internal.example.com:22",
+          "production.example.com:22": "production.example.com:22",
+          "production:22": "production.example.com:22"
+        }
+      },
+      "directories": [
+        {
+          "path": "/root/.ssh",
+          "mode": "0700"
+        }
+      ],
+      "files": [
+        {
+          "source": "~/.config/gondolin/homelab-agent/ssh/id_ed25519",
+          "destination": "/root/.ssh/id_ed25519",
+          "mode": "0600",
+          "required": true
+        },
+        {
+          "source": "~/.config/gondolin/homelab-agent/ssh/id_ed25519_prod",
+          "destination": "/root/.ssh/id_ed25519_prod",
+          "mode": "0600",
+          "required": true
+        },
+        {
+          "source": "~/.config/gondolin/homelab-agent/ssh/known_hosts",
+          "destination": "/root/.ssh/known_hosts",
+          "mode": "0644",
+          "required": true
+        },
+        {
+          "destination": "/etc/ssh/ssh_config.d/99-agent.conf",
+          "mode": "0644",
+          "content": "Host staging.internal.example.com staging testing.internal.example.com testing\n    IdentityFile /root/.ssh/id_ed25519\n\nHost production.example.com production\n    IdentityFile /root/.ssh/id_ed25519_prod\n\nHost *\n    User agent\n    BatchMode yes\n    IdentitiesOnly yes\n    StrictHostKeyChecking yes\n    UserKnownHostsFile /root/.ssh/known_hosts\n    GlobalKnownHostsFile /dev/null\n    LogLevel ERROR\n    ForwardAgent no\n    ClearAllForwardings yes\n    ControlMaster no\n    ControlPath none\n    ServerAliveInterval 15\n    ServerAliveCountMax 3\n"
+        }
+      ],
+      "promptGuidance": [
+        "openssl is absent from the VM image"
+      ]
+    },
+    {
+      "name": "dbuild",
+      "imagePattern": "dbuild-agent:*",
+      "promptGuidance": [
+        "The dbuild CLI from daemonless.io is FreeBSD-specific and is not installed in this Linux image by default. Use buildah, podman, and skopeo for daemonless OCI work, or provide a Linux dbuild binary via postBuild commands."
+      ]
+    }
+  ]
+}
