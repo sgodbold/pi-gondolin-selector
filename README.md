@@ -1,3 +1,6 @@
+<img width="1263" height="630" alt="image" src="https://github.com/user-attachments/assets/b8be3385-27f8-4f53-9ad8-2605bdb9c79c" />
+
+
 # pi-gondolin-selector
 
 A [Pi](https://pi.dev) extension that selects a locally tagged Gondolin image at startup, creates an ephemeral VM from it, and routes Pi's built-in tools into that VM.
