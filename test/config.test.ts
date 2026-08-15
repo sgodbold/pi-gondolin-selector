@@ -63,6 +63,62 @@ test("profile files require exactly one content source", () => {
 	);
 });
 
+test("profile mounts require safe, non-overlapping guest destinations", () => {
+	assert.doesNotThrow(() =>
+		validateConfig({
+			profiles: [
+				{
+					name: "mounted",
+					imagePattern: "mounted:*",
+					mounts: [{ source: "~/.config/example", destination: "/host/config/example", required: false }],
+				},
+			],
+		}),
+	);
+	assert.throws(
+		() =>
+			validateConfig({
+				profiles: [
+					{
+						name: "reserved",
+						imagePattern: "reserved:*",
+						mounts: [{ source: "/tmp", destination: "/workspace/config" }],
+					},
+				],
+			}),
+		/overlaps guest mount \/workspace/,
+	);
+	assert.throws(
+		() =>
+			validateConfig({
+				profiles: [
+					{
+						name: "overlap",
+						imagePattern: "overlap:*",
+						mounts: [
+							{ source: "/tmp/one", destination: "/host/config" },
+							{ source: "/tmp/two", destination: "/host/config/nested" },
+						],
+					},
+				],
+			}),
+		/overlaps guest mount \/host\/config/,
+	);
+	assert.throws(
+		() =>
+			validateConfig({
+				profiles: [
+					{
+						name: "unnormalized",
+						imagePattern: "unnormalized:*",
+						mounts: [{ source: "/tmp", destination: "/host/../etc" }],
+					},
+				],
+			}),
+		/normalized absolute guest path/,
+	);
+});
+
 test("state round trips and is owner-only", () => {
 	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-selector-"));
 	const statePath = path.join(directory, "state.json");

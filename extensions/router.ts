@@ -40,15 +40,49 @@ const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const DEFAULT_GREP_LIMIT = 100;
 const HOST_BASH_PREFIX = "host:";
 
+export interface GondolinReadonlyMount {
+	hostPath: string;
+	guestPath: string;
+}
+
 export interface GondolinAgentProfile {
 	resolveImagePath(): string;
 	vmOptions?: Pick<VMOptions, "dns" | "tcp">;
 	validateHostResources?(): void | Promise<void>;
+	readonlyMounts?: readonly GondolinReadonlyMount[];
 	provisionVm?(vm: VM): void | Promise<void>;
 	promptLines?: readonly string[];
 	displayName?: string;
 	/** False when startup selection was cancelled or failed. */
 	isEnabled?(): boolean;
+}
+
+function guestPathsOverlap(left: string, right: string): boolean {
+	const isSameOrInside = (root: string, candidate: string) => {
+		const relative = path.posix.relative(root, candidate);
+		return relative === "" || (!relative.startsWith("../") && relative !== "..");
+	};
+	return isSameOrInside(left, right) || isSameOrInside(right, left);
+}
+
+function normalizeReadonlyMounts(mounts: readonly GondolinReadonlyMount[]): GondolinReadonlyMount[] {
+	const result: GondolinReadonlyMount[] = [];
+	const reservedGuestPaths = [GUEST_WORKSPACE, GUEST_PI_DOCUMENTATION];
+	for (const mount of mounts) {
+		if (!path.posix.isAbsolute(mount.guestPath) || path.posix.normalize(mount.guestPath) !== mount.guestPath) {
+			throw new Error(`Read-only mount destination must be a normalized absolute guest path: ${mount.guestPath}`);
+		}
+		const conflict = [...reservedGuestPaths, ...result.map(({ guestPath }) => guestPath)].find((guestPath) =>
+			guestPathsOverlap(guestPath, mount.guestPath),
+		);
+		if (conflict) throw new Error(`Read-only mount destination ${mount.guestPath} overlaps guest mount ${conflict}`);
+
+		const hostPath = fs.realpathSync(mount.hostPath);
+		fs.accessSync(hostPath, fs.constants.R_OK);
+		if (!fs.statSync(hostPath).isDirectory()) throw new Error(`Read-only mount source is not a directory: ${hostPath}`);
+		result.push({ hostPath, guestPath: mount.guestPath });
+	}
+	return result;
 }
 
 function validatePiPackageRoot(candidate: string): string {
@@ -478,6 +512,7 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 	let vm: VM | undefined;
 	let vmStarting: Promise<VM> | undefined;
 	let shellPath = "/bin/sh";
+	let activeReadonlyMounts: GondolinReadonlyMount[] = [];
 
 	async function startVm(ctx?: ExtensionContext): Promise<VM> {
 		if (profile.isEnabled && !profile.isEnabled()) throw new Error("No Gondolin image selected");
@@ -487,19 +522,23 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 
 		try {
 			await profile.validateHostResources?.();
+			const readonlyMounts = normalizeReadonlyMounts(profile.readonlyMounts ?? []);
+			const vfsMounts = {
+				[GUEST_WORKSPACE]: new RealFSProvider(localCwd),
+				[GUEST_PI_DOCUMENTATION]: new ReadonlyProvider(new RealFSProvider(piPackageRoot)),
+			} as Record<string, RealFSProvider | ReadonlyProvider>;
+			for (const mount of readonlyMounts) {
+				vfsMounts[mount.guestPath] = new ReadonlyProvider(new RealFSProvider(mount.hostPath));
+			}
 			created = await VM.create({
 				...profile.vmOptions,
 				sessionLabel: `pi ${path.basename(localCwd)}`,
 				sandbox: {
 					imagePath: profile.resolveImagePath(),
 				},
-				vfs: {
-					mounts: {
-						[GUEST_WORKSPACE]: new RealFSProvider(localCwd),
-						[GUEST_PI_DOCUMENTATION]: new ReadonlyProvider(new RealFSProvider(piPackageRoot)),
-					},
-				},
+				vfs: { mounts: vfsMounts },
 			});
+			activeReadonlyMounts = readonlyMounts;
 			await profile.provisionVm?.(created);
 			for (const requiredPath of ["README.md", "docs", "examples"]) {
 				await created.fs.access(path.posix.join(GUEST_PI_DOCUMENTATION, requiredPath));
@@ -511,12 +550,14 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 				"gondolin",
 				ctx.ui.theme.fg("accent", `Gondolin: ${created.id.slice(0, 8)} (${GUEST_WORKSPACE})`),
 			);
+			const mountMessage = readonlyMounts.length > 0 ? `; profile mounts: ${readonlyMounts.length} (read-only)` : "";
 			ctx?.ui.notify(
-				`Gondolin VM ready. Workspace: ${GUEST_WORKSPACE}; Pi documentation: ${GUEST_PI_DOCUMENTATION} (read-only).`,
+				`Gondolin VM ready. Workspace: ${GUEST_WORKSPACE}; Pi documentation: ${GUEST_PI_DOCUMENTATION} (read-only)${mountMessage}.`,
 				"info",
 			);
 			return created;
 		} catch (error) {
+			activeReadonlyMounts = [];
 			let cleanupError: unknown;
 			if (created) {
 				try {
@@ -562,6 +603,7 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		const activeVm = vm;
 		vm = undefined;
 		vmStarting = undefined;
+		activeReadonlyMounts = [];
 		if (!activeVm) {
 			ctx.ui.setStatus("gondolin", undefined);
 			return;
@@ -585,6 +627,9 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 					`Host workspace: ${localCwd}`,
 					`Guest workspace: ${GUEST_WORKSPACE}`,
 					`Pi documentation: ${GUEST_PI_DOCUMENTATION} (read-only; host: ${piPackageRoot})`,
+					...activeReadonlyMounts.map(
+						({ hostPath, guestPath }) => `Profile mount: ${guestPath} (read-only; host: ${hostPath})`,
+					),
 					`Shell: ${shellPath}`,
 				].join("\n"),
 				"info",
@@ -695,6 +740,10 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		systemPrompt = systemPrompt.split(piPackageRoot).join(GUEST_PI_DOCUMENTATION);
 		const documentationLine = `Pi documentation is mounted read-only at ${GUEST_PI_DOCUMENTATION} (README.md, docs/, and examples/).`;
 		if (!systemPrompt.includes(documentationLine)) systemPrompt += `\n${documentationLine}`;
+		for (const { hostPath, guestPath } of activeReadonlyMounts) {
+			const mountLine = `Host directory ${hostPath} is mounted read-only at ${guestPath}.`;
+			if (!systemPrompt.includes(mountLine)) systemPrompt += `\n${mountLine}`;
+		}
 		for (const promptLine of profile.promptLines ?? []) {
 			if (!systemPrompt.includes(promptLine)) systemPrompt += `\n${promptLine}`;
 		}

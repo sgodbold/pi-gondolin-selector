@@ -140,6 +140,13 @@ Images requiring only the standard workspace, documentation mount, and environme
       "content": "Host service service.example.com\n    IdentityFile /root/.ssh/id_ed25519\n"
     }
   ],
+  "mounts": [
+    {
+      "source": "~/.config/my-application",
+      "destination": "/host/config/my-application",
+      "required": true
+    }
+  ],
   "promptGuidance": [
     "The service alias resolves to service.example.com."
   ]
@@ -162,7 +169,11 @@ Profile rules:
 - `~` expansion applies only to host `source` paths.
 - Source files are required unless `required` is explicitly `false`.
 - Required host files are validated before VM creation.
-- Host files are copied into the ephemeral guest; host credential directories are never mounted.
+- Host files are copied into the ephemeral guest.
+- `mounts` exposes a host directory live and read-only at an absolute guest destination; `~` expansion applies to its host source.
+- Mount sources are required unless `required` is explicitly `false`. An absent optional source is skipped.
+- Mount destinations must be normalized, unique, and non-overlapping. They cannot overlap `/workspace` or `/opt/pi-coding-agent`.
+- Mount only narrowly scoped directories: all mounted contents are visible to the agent and may contain sensitive data.
 - JSON strings must escape embedded newlines as `\n`.
 
 Inline files make security-sensitive runtime configuration independent of image contents. The included homelab example provisions `/etc/ssh/ssh_config.d/99-agent.conf` this way.

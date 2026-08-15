@@ -19,7 +19,11 @@ import {
 	type GondolinProfileConfig,
 	writeStateAtomic,
 } from "./config.ts";
-import { createGondolinAgent, type GondolinAgentProfile } from "./router.ts";
+import {
+	createGondolinAgent,
+	type GondolinAgentProfile,
+	type GondolinReadonlyMount,
+} from "./router.ts";
 
 const CONFIG_FILE = "gondolin-selector.json";
 const STATE_FILE = "gondolin-selector-state.json";
@@ -39,6 +43,22 @@ async function runGuestCommand(vm: VM, command: string): Promise<void> {
 	if (result.exitCode !== 0) throw new Error(`Guest provisioning command failed with exit code ${result.exitCode}`);
 }
 
+function resolveReadonlyMounts(profile: GondolinProfileConfig | undefined): GondolinReadonlyMount[] {
+	const mounts: GondolinReadonlyMount[] = [];
+	for (const mount of profile?.mounts ?? []) {
+		const source = expandHostSourcePath(mount.source);
+		try {
+			fs.accessSync(source, fs.constants.R_OK);
+			const canonicalSource = fs.realpathSync(source);
+			if (!fs.statSync(canonicalSource).isDirectory()) throw new Error("not a directory");
+			mounts.push({ hostPath: canonicalSource, guestPath: mount.destination });
+		} catch {
+			if (mount.required !== false) throw new Error(`Required mount source is not a readable directory: ${source}`);
+		}
+	}
+	return mounts;
+}
+
 function validateHostResources(profile: GondolinProfileConfig | undefined): void {
 	for (const file of profile?.files ?? []) {
 		if (!file.source) continue;
@@ -49,6 +69,7 @@ function validateHostResources(profile: GondolinProfileConfig | undefined): void
 			if (file.required !== false) throw new Error(`Required file is not readable: ${source}`);
 		}
 	}
+	resolveReadonlyMounts(profile);
 }
 
 async function provisionVm(vm: VM, profile: GondolinProfileConfig | undefined): Promise<void> {
@@ -201,6 +222,9 @@ export default function gondolinSelector(pi: ExtensionAPI) {
 			};
 		},
 		validateHostResources: () => validateHostResources(selected?.profile),
+		get readonlyMounts(): readonly GondolinReadonlyMount[] {
+			return resolveReadonlyMounts(selected?.profile);
+		},
 		provisionVm: (vm) => provisionVm(vm, selected?.profile),
 		get promptLines(): readonly string[] {
 			return selected?.profile?.promptGuidance ?? [];

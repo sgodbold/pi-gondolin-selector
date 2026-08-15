@@ -17,6 +17,14 @@ export interface GuestFileConfig {
 	content?: string;
 }
 
+export interface HostMountConfig {
+	/** Host directory. A leading ~/ is expanded against the host home directory. */
+	source: string;
+	/** Absolute path where the directory is exposed read-only in the guest. */
+	destination: string;
+	required?: boolean;
+}
+
 export interface GondolinProfileConfig {
 	name: string;
 	/** A minimatch glob matched against the selected image reference. */
@@ -28,6 +36,7 @@ export interface GondolinProfileConfig {
 	};
 	directories?: GuestDirectoryConfig[];
 	files?: GuestFileConfig[];
+	mounts?: HostMountConfig[];
 	promptGuidance?: string[];
 }
 
@@ -59,6 +68,14 @@ function assertStringArray(value: unknown, field: string): asserts value is stri
 	if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
 		throw new Error(`${field} must be an array of strings`);
 	}
+}
+
+function guestPathsOverlap(left: string, right: string): boolean {
+	const isSameOrInside = (root: string, candidate: string) => {
+		const relative = path.posix.relative(root, candidate);
+		return relative === "" || (!relative.startsWith("../") && relative !== "..");
+	};
+	return isSameOrInside(left, right) || isSameOrInside(right, left);
 }
 
 export function validateConfig(value: unknown): SelectorConfig {
@@ -126,6 +143,9 @@ export function validateConfig(value: unknown): SelectorConfig {
 		if (profile.files !== undefined && !Array.isArray(profile.files)) {
 			throw new Error(`${prefix}.files must be an array`);
 		}
+		if (profile.mounts !== undefined && !Array.isArray(profile.mounts)) {
+			throw new Error(`${prefix}.mounts must be an array`);
+		}
 		for (const [directoryIndex, directory] of (profile.directories ?? []).entries()) {
 			if (!directory || typeof directory.path !== "string" || !path.posix.isAbsolute(directory.path)) {
 				throw new Error(`${prefix}.directories[${directoryIndex}].path must be an absolute guest path`);
@@ -147,6 +167,33 @@ export function validateConfig(value: unknown): SelectorConfig {
 				throw new Error(`${filePrefix}.required must be a boolean`);
 			}
 			parseMode(file.mode, `${filePrefix}.mode`);
+		}
+
+		const reservedMountPaths = ["/workspace", "/opt/pi-coding-agent"];
+		const mountDestinations: string[] = [];
+		for (const [mountIndex, mount] of (profile.mounts ?? []).entries()) {
+			const mountPrefix = `${prefix}.mounts[${mountIndex}]`;
+			if (!mount || typeof mount !== "object") throw new Error(`${mountPrefix} must be an object`);
+			if (typeof mount.source !== "string" || mount.source.length === 0) {
+				throw new Error(`${mountPrefix}.source must be a non-empty host directory path`);
+			}
+			if (
+				typeof mount.destination !== "string" ||
+				!path.posix.isAbsolute(mount.destination) ||
+				path.posix.normalize(mount.destination) !== mount.destination
+			) {
+				throw new Error(`${mountPrefix}.destination must be a normalized absolute guest path`);
+			}
+			if (mount.required !== undefined && typeof mount.required !== "boolean") {
+				throw new Error(`${mountPrefix}.required must be a boolean`);
+			}
+			const conflictsWith = [...reservedMountPaths, ...mountDestinations].find((existing) =>
+				guestPathsOverlap(existing, mount.destination),
+			);
+			if (conflictsWith) {
+				throw new Error(`${mountPrefix}.destination ${mount.destination} overlaps guest mount ${conflictsWith}`);
+			}
+			mountDestinations.push(mount.destination);
 		}
 	}
 	return config;
