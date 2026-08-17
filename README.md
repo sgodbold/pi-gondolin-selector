@@ -224,6 +224,10 @@ It then forces guest-canonical identity, shell, path, temporary, and XDG values.
 
 `GIT_*` is retained for compatibility and can contain sensitive Git configuration. Tighten the source if stricter isolation is required.
 
+## Known limitations
+
+Aborting or timing out a foreground command can stop Pi's host-side exec session without terminating the command inside a Gondolin 0.12.0 guest. See [Gondolin foreground exec cancellation limitation](docs/gondolin-foreground-exec-cancellation.md) for impact, the decision not to add a selector-side workaround, and the proposed design if that decision is revisited.
+
 ## Development
 
 ```bash
