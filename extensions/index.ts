@@ -15,6 +15,8 @@ import {
 	parseMode,
 	prioritizeRemembered,
 	readState,
+	referencesForProfile,
+	resolveProfileReference,
 	selectProfile,
 	type GondolinProfileConfig,
 	writeStateAtomic,
@@ -72,6 +74,69 @@ function validateHostResources(profile: GondolinProfileConfig | undefined): void
 	resolveReadonlyMounts(profile);
 }
 
+function formatProfileOverview(
+	profiles: readonly GondolinProfileConfig[],
+	references: readonly string[],
+	configPath: string,
+): string {
+	const lines = [`Gondolin profiles (${configPath}):`];
+	if (profiles.length === 0) lines.push("  (none configured)");
+
+	for (const profile of profiles) {
+		const matches = referencesForProfile(profile, references);
+		let selection: string;
+		if (matches.length === 0) {
+			selection = "unavailable (no matching local image)";
+		} else if (matches.length > 1) {
+			selection = `choose an image with --gondolin-image (${matches.length} matches)`;
+		} else {
+			try {
+				selectProfile(matches[0]!, profiles);
+				selection = "ready";
+			} catch (error) {
+				selection = `invalid (${error instanceof Error ? error.message : String(error)})`;
+			}
+		}
+		const runtime = [
+			`dns=${profile.network?.dns?.mode ?? "default"}`,
+			`tcpMappings=${Object.keys(profile.network?.tcpHosts ?? {}).length}`,
+			`directories=${profile.directories?.length ?? 0}`,
+			`files=${profile.files?.length ?? 0}`,
+			`mounts=${profile.mounts?.length ?? 0}`,
+		];
+		let resources = "ready";
+		try {
+			validateHostResources(profile);
+		} catch (error) {
+			resources = error instanceof Error ? error.message : String(error);
+		}
+
+		lines.push(
+			`\n${profile.name}`,
+			`  Image pattern: ${profile.imagePattern}`,
+			`  Matching images: ${matches.join(", ") || "(none)"}`,
+			`  Selection: ${selection}`,
+			`  Runtime: ${runtime.join(", ")}`,
+			`  Host resources: ${resources}`,
+		);
+	}
+
+	const profiledReferences = new Set(profiles.flatMap((profile) => referencesForProfile(profile, references)));
+	const genericReferences = references.filter((reference) => !profiledReferences.has(reference));
+	if (genericReferences.length > 0) lines.push(`\nUnprofiled images: ${genericReferences.join(", ")}`);
+	return lines.join("\n");
+}
+
+function displayProfileOverview(ctx: ExtensionContext, overview: string): void {
+	if (ctx.hasUI) {
+		ctx.ui.notify(overview, "info");
+	} else if (ctx.mode === "json") {
+		process.stderr.write(`${overview}\n`);
+	} else {
+		process.stdout.write(`${overview}\n`);
+	}
+}
+
 async function provisionVm(vm: VM, profile: GondolinProfileConfig | undefined): Promise<void> {
 	for (const directory of profile?.directories ?? []) {
 		const mode = parseMode(directory.mode, `directory ${directory.path} mode`);
@@ -101,6 +166,20 @@ async function provisionVm(vm: VM, profile: GondolinProfileConfig | undefined): 
 }
 
 export default function gondolinSelector(pi: ExtensionAPI) {
+	pi.registerFlag("gondolin-profile", {
+		description: "Select a configured Gondolin profile without showing the startup menu",
+		type: "string",
+	});
+	pi.registerFlag("gondolin-image", {
+		description: "Select an exact Gondolin image for --gondolin-profile",
+		type: "string",
+	});
+	pi.registerFlag("list-gondolin-profiles", {
+		description: "List configured Gondolin profiles and matching local images",
+		type: "boolean",
+		default: false,
+	});
+
 	const agentDir = getAgentDir();
 	const configPath = path.join(agentDir, CONFIG_FILE);
 	const statePath = path.join(agentDir, STATE_FILE);
@@ -157,8 +236,35 @@ export default function gondolinSelector(pi: ExtensionAPI) {
 	pi.on("session_start", async (event, ctx) => {
 		cancelled = false;
 		try {
+			const profileFlag = pi.getFlag("gondolin-profile");
+			const imageFlag = pi.getFlag("gondolin-image");
+			const listProfiles = pi.getFlag("list-gondolin-profiles") === true;
+			const explicitProfile = typeof profileFlag === "string" ? profileFlag : undefined;
+			const explicitImage = typeof imageFlag === "string" ? imageFlag : undefined;
+
+			if (listProfiles) {
+				if (explicitProfile !== undefined || explicitImage !== undefined) {
+					throw new Error("--list-gondolin-profiles cannot be combined with --gondolin-profile or --gondolin-image");
+				}
+				cancelled = true;
+				selected = undefined;
+				displayProfileOverview(ctx, formatProfileOverview(config.profiles ?? [], discoverReferences(), configPath));
+				ctx.shutdown();
+				return;
+			}
+			if (explicitImage !== undefined && explicitProfile === undefined) {
+				throw new Error("--gondolin-image requires --gondolin-profile");
+			}
+
 			let reference: string | undefined;
-			if (event.reason === "startup" && ctx.hasUI) {
+			if (explicitProfile !== undefined) {
+				reference = resolveProfileReference(
+					explicitProfile,
+					explicitImage,
+					discoverReferences(),
+					config.profiles ?? [],
+				);
+			} else if (event.reason === "startup" && ctx.hasUI) {
 				reference = await chooseReference(ctx, true);
 			} else {
 				const remembered = rememberedReference();
@@ -179,7 +285,7 @@ export default function gondolinSelector(pi: ExtensionAPI) {
 				return;
 			}
 			selected = resolveSelection(reference);
-			remember(reference);
+			if (explicitProfile === undefined) remember(reference);
 		} catch (error) {
 			cancelled = true;
 			selected = undefined;

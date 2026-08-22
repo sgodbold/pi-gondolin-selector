@@ -97,10 +97,13 @@ export function validateConfig(value: unknown): SelectorConfig {
 	if (config.profiles !== undefined && !Array.isArray(config.profiles)) {
 		throw new Error("profiles must be an array");
 	}
+	const profileNames = new Set<string>();
 	for (const [profileIndex, profile] of (config.profiles ?? []).entries()) {
 		const prefix = `profiles[${profileIndex}]`;
 		if (!profile || typeof profile !== "object") throw new Error(`${prefix} must be an object`);
 		if (typeof profile.name !== "string" || !profile.name) throw new Error(`${prefix}.name must be a non-empty string`);
+		if (profileNames.has(profile.name)) throw new Error(`${prefix}.name duplicates profile ${JSON.stringify(profile.name)}`);
+		profileNames.add(profile.name);
 		if (typeof profile.imagePattern !== "string" || !profile.imagePattern) {
 			throw new Error(`${prefix}.imagePattern must be a non-empty minimatch glob`);
 		}
@@ -214,6 +217,66 @@ export function selectProfile(reference: string, profiles: readonly GondolinProf
 		throw new Error(`Image ${reference} matches multiple Gondolin profiles: ${matches.map(({ name }) => name).join(", ")}`);
 	}
 	return matches[0];
+}
+
+export function findProfile(
+	name: string,
+	profiles: readonly GondolinProfileConfig[],
+): GondolinProfileConfig {
+	const matches = profiles.filter((profile) => profile.name === name);
+	if (matches.length === 0) {
+		const available = profiles.map((profile) => profile.name).join(", ") || "(none configured)";
+		throw new Error(`Unknown Gondolin profile ${JSON.stringify(name)}. Available profiles: ${available}`);
+	}
+	if (matches.length > 1) throw new Error(`Multiple Gondolin profiles are named ${JSON.stringify(name)}`);
+	return matches[0]!;
+}
+
+export function referencesForProfile(
+	profile: GondolinProfileConfig,
+	references: readonly string[],
+): string[] {
+	return references.filter((reference) => minimatch(reference, profile.imagePattern)).sort((left, right) =>
+		left.localeCompare(right),
+	);
+}
+
+export function resolveProfileReference(
+	profileName: string,
+	explicitImage: string | undefined,
+	references: readonly string[],
+	profiles: readonly GondolinProfileConfig[],
+): string {
+	const profile = findProfile(profileName, profiles);
+	const matches = referencesForProfile(profile, references);
+
+	if (explicitImage !== undefined) {
+		if (!references.includes(explicitImage)) {
+			throw new Error(`Gondolin image ${JSON.stringify(explicitImage)} is not available to the selector`);
+		}
+		const actualProfile = selectProfile(explicitImage, profiles);
+		if (actualProfile?.name !== profile.name) {
+			const actual = actualProfile ? `profile ${JSON.stringify(actualProfile.name)}` : "the generic profile";
+			throw new Error(
+				`Gondolin image ${JSON.stringify(explicitImage)} belongs to ${actual}, not profile ${JSON.stringify(profileName)}`,
+			);
+		}
+		return explicitImage;
+	}
+
+	if (matches.length === 0) {
+		throw new Error(
+			`No locally tagged Gondolin image matches profile ${JSON.stringify(profileName)} (${profile.imagePattern})`,
+		);
+	}
+	if (matches.length > 1) {
+		throw new Error(
+			`Profile ${JSON.stringify(profileName)} matches multiple Gondolin images: ${matches.join(", ")}. ` +
+				"Select one with --gondolin-image <reference>.",
+		);
+	}
+	selectProfile(matches[0]!, profiles); // Reject an image that also matches another profile.
+	return matches[0]!;
 }
 
 export function filterReferences(references: readonly string[], imageFilter?: string): string[] {

@@ -156,6 +156,7 @@ Images requiring only the standard workspace, documentation mount, and environme
 Profile rules:
 
 - `imagePattern` is a minimatch glob, unlike the regular-expression `imageFilter`.
+- Profile names must be unique; they are used by `--gondolin-profile`.
 - Profiles are evaluated in configuration order.
 - Selecting an image that matches multiple profiles is an error.
 - An image matching no profile uses the generic runtime behavior.
@@ -187,6 +188,41 @@ Inline files make security-sensitive runtime configuration independent of image 
 5. Run `/gondolin` to confirm the active image and mounts.
 6. Verify permitted network destinations work and unpermitted destinations remain blocked.
 7. Verify provisioned file modes without printing credential contents.
+
+## Explicit CLI selection
+
+Use a configured profile name to bypass the startup menu:
+
+```bash
+pi --gondolin-profile homelab
+```
+
+If the profile matches multiple locally tagged images, select an exact image as well:
+
+```bash
+pi --gondolin-profile homelab --gondolin-image homelab-agent:dev
+```
+
+`--gondolin-profile` succeeds without `--gondolin-image` only when exactly one available image matches the profile. `--gondolin-image` requires `--gondolin-profile`, must name an image available through the selector, and must match that profile. Explicit CLI selections apply only to the current process and do not update remembered project state.
+
+List configured profiles, matching local images, selection status, runtime settings, and host-resource availability without starting a VM:
+
+```bash
+pi --list-gondolin-profiles
+```
+
+This is useful when constructing child agent arguments:
+
+```json
+{
+  "agentArgs": [
+    "--exclude-tools",
+    "herdr_layout,herdr_pane,herdr_agent",
+    "--gondolin-profile",
+    "homelab"
+  ]
+}
+```
 
 ## Remembered selection
 

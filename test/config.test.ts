@@ -8,6 +8,8 @@ import {
 	parseMode,
 	prioritizeRemembered,
 	readState,
+	referencesForProfile,
+	resolveProfileReference,
 	selectProfile,
 	validateConfig,
 	writeStateAtomic,
@@ -31,6 +33,69 @@ test("profile patterns use minimatch and ambiguity is rejected", () => {
 	assert.throws(
 		() => selectProfile("homelab-agent:latest", [...profiles, { name: "all", imagePattern: "*-agent:*" }]),
 		/matches multiple Gondolin profiles: homelab, all/,
+	);
+});
+
+test("profile names must be unique", () => {
+	assert.throws(
+		() =>
+			validateConfig({
+				profiles: [
+					{ name: "homelab", imagePattern: "homelab-agent:*" },
+					{ name: "homelab", imagePattern: "other-agent:*" },
+				],
+			}),
+		/duplicates profile "homelab"/,
+	);
+});
+
+test("explicit profiles resolve unique images and exact image overrides", () => {
+	const profiles = [
+		{ name: "default", imagePattern: "default-agent:*" },
+		{ name: "homelab", imagePattern: "homelab-agent:*" },
+	];
+	const references = ["homelab-agent:latest", "default-agent:latest"];
+	assert.deepEqual(referencesForProfile(profiles[1]!, references), ["homelab-agent:latest"]);
+	assert.equal(resolveProfileReference("homelab", undefined, references, profiles), "homelab-agent:latest");
+	assert.equal(
+		resolveProfileReference("homelab", "homelab-agent:dev", [...references, "homelab-agent:dev"], profiles),
+		"homelab-agent:dev",
+	);
+	assert.equal(
+		resolveProfileReference(
+			"homelab",
+			undefined,
+			[...references, "unrelated-agent:latest"],
+			[...profiles, { name: "unrelated", imagePattern: "unrelated-agent:*" }, { name: "all-unrelated", imagePattern: "unrelated-*" }],
+		),
+		"homelab-agent:latest",
+	);
+});
+
+test("explicit profile selection rejects unknown, unavailable, ambiguous, and mismatched images", () => {
+	const profiles = [
+		{ name: "default", imagePattern: "default-agent:*" },
+		{ name: "homelab", imagePattern: "homelab-agent:*" },
+	];
+	const references = ["default-agent:latest", "homelab-agent:latest", "homelab-agent:dev"];
+	assert.throws(() => resolveProfileReference("missing", undefined, references, profiles), /Unknown Gondolin profile/);
+	assert.throws(() => resolveProfileReference("", undefined, references, profiles), /Unknown Gondolin profile/);
+	assert.throws(
+		() => resolveProfileReference("homelab", undefined, references, profiles),
+		/matches multiple Gondolin images.*--gondolin-image/,
+	);
+	assert.throws(
+		() => resolveProfileReference("homelab", "missing:latest", references, profiles),
+		/not available to the selector/,
+	);
+	assert.throws(() => resolveProfileReference("homelab", "", references, profiles), /not available to the selector/);
+	assert.throws(
+		() => resolveProfileReference("homelab", "default-agent:latest", references, profiles),
+		/belongs to profile "default", not profile "homelab"/,
+	);
+	assert.throws(
+		() => resolveProfileReference("homelab", undefined, ["default-agent:latest"], profiles),
+		/No locally tagged Gondolin image matches profile "homelab"/,
 	);
 });
 
