@@ -286,6 +286,10 @@ export default function gondolinSelector(pi: ExtensionAPI) {
 			}
 			selected = resolveSelection(reference);
 			if (explicitProfile === undefined) remember(reference);
+			pi.events.emit("gondolin-selector:selected", {
+				profile: selected.profile?.name ?? null,
+				reference: selected.reference,
+			});
 		} catch (error) {
 			cancelled = true;
 			selected = undefined;

@@ -238,6 +238,24 @@ The remembered image is placed first in the startup selector, but interactive st
 
 For noninteractive startup, the extension uses a valid remembered image. Select one interactively first if none is remembered.
 
+## Inter-extension events
+
+After resolving the active selection, the extension emits `gondolin-selector:selected` on Pi's shared event bus:
+
+```typescript
+pi.events.on("gondolin-selector:selected", (data) => {
+  const selection = data as {
+    profile: string | null;
+    reference: string;
+  };
+  // Activate profile-specific coordination here.
+});
+```
+
+`profile` is `null` when the image uses generic runtime behavior. Register the listener in the consuming extension's factory so it cannot miss the session-start event. The event means that selection and local image resolution succeeded; it does not mean that VM startup and provisioning have completed. Event handlers are not awaited by the emitter, and the event is intended for coordination rather than as an authentication boundary.
+
+`/gondolin-select` does not emit this event because it only remembers a selection for the next Pi start.
+
 ## Commands
 
 - `/gondolin` shows the active VM, image, mounts, and shell.
