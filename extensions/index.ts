@@ -174,6 +174,10 @@ export default function gondolinSelector(pi: ExtensionAPI) {
 		description: "Select an exact Gondolin image for --gondolin-profile",
 		type: "string",
 	});
+	pi.registerFlag("gondolin-workspace-root", {
+		description: "Mount this host directory at /workspace while keeping Pi's CWD as the guest child CWD",
+		type: "string",
+	});
 	pi.registerFlag("list-gondolin-profiles", {
 		description: "List configured Gondolin profiles and matching local images",
 		type: "boolean",
@@ -341,6 +345,14 @@ export default function gondolinSelector(pi: ExtensionAPI) {
 		},
 		get displayName(): string | undefined {
 			return selected?.reference;
+		},
+		resolveWorkspaceRoot: () => {
+			const value = pi.getFlag("gondolin-workspace-root");
+			if (value === undefined) return undefined;
+			if (typeof value !== "string" || value.length === 0) {
+				throw new Error("--gondolin-workspace-root must be a non-empty host directory path");
+			}
+			return value;
 		},
 	};
 

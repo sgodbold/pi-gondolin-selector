@@ -5,7 +5,7 @@
 
 A [Pi](https://pi.dev) extension that selects a locally tagged Gondolin image at startup, creates an ephemeral VM from it, and routes Pi's built-in tools into that VM.
 
-The host project is mounted read/write at `/workspace`. The installed Pi package documentation is mounted read-only at `/opt/pi-coding-agent`. Other guest filesystem changes disappear when Pi exits.
+By default, the host project is mounted read/write at `/workspace` and is also the guest working directory. A parent host workspace can instead be mounted while Pi and all guest tools start in a child project directory. The installed Pi package documentation is mounted read-only at `/opt/pi-coding-agent`. Other guest filesystem changes disappear when Pi exits.
 
 ## Requirements
 
@@ -189,6 +189,43 @@ Inline files make security-sensitive runtime configuration independent of image 
 6. Verify permitted network destinations work and unpermitted destinations remain blocked.
 7. Verify provisioned file modes without printing credential contents.
 
+## Workspace mount root and project CWD
+
+By default, Pi's host working directory is mounted at `/workspace`, and guest tools start there. For delegated worktrees, start Pi in the assigned worktree and pass the parent workspace separately:
+
+```bash
+cd /path/to/coordinator/grimoire/.worktrees/task-1/worker
+pi --gondolin-workspace-root /path/to/coordinator
+```
+
+This produces:
+
+```text
+Host Pi CWD:       /path/to/coordinator/grimoire/.worktrees/task-1/worker
+Host mount root:   /path/to/coordinator
+Guest mount root:  /workspace
+Guest initial CWD: /workspace/grimoire/.worktrees/task-1/worker
+```
+
+The workspace root defaults to Pi's host CWD for backward compatibility. It may be relative to Pi's host CWD, is canonicalized before use, and must contain that CWD. The selector rejects paths outside the mounted workspace and refuses to mount the host filesystem root.
+
+During disposable VM provisioning, the selector adds only the computed guest project CWD as a Git `safe.directory` entry in `/root/.gitconfig`. It never changes host Git configuration or configures `safe.directory=*`.
+
+When constructing child agent arguments, pass the workspace root alongside the explicit Gondolin profile:
+
+```json
+{
+  "agentArgs": [
+    "--gondolin-profile",
+    "homelab",
+    "--gondolin-workspace-root",
+    "/path/to/coordinator"
+  ]
+}
+```
+
+Starting Pi in a worktree also makes that canonical worktree path the remembered-selection identity. Delegated noninteractive children should therefore use explicit profile/image arguments rather than relying on selection remembered for the workspace root.
+
 ## Explicit CLI selection
 
 Use a configured profile name to bypass the startup menu:
@@ -219,7 +256,9 @@ This is useful when constructing child agent arguments:
     "--exclude-tools",
     "herdr_layout,herdr_pane,herdr_agent",
     "--gondolin-profile",
-    "homelab"
+    "homelab",
+    "--gondolin-workspace-root",
+    "/path/to/coordinator"
   ]
 }
 ```
@@ -276,7 +315,7 @@ Agent Bash and interactive Bash use the same allowlist. The extension retains:
 
 It then forces guest-canonical identity, shell, path, temporary, and XDG values. API tokens, `SSH_AUTH_SOCK`, desktop/session variables, and all other unlisted variables are dropped.
 
-`GIT_*` is retained for compatibility and can contain sensitive Git configuration. Tighten the source if stricter isolation is required.
+`GIT_*` is retained for compatibility and can contain sensitive Git configuration. The bare `GIT_CONFIG` variable and every inherited `GIT_CONFIG_*` variable are removed. Guest Bash then sets only `GIT_CONFIG_GLOBAL=/root/.gitconfig` so it reads the provisioned exact `safe.directory` entry.
 
 ## Known limitations
 

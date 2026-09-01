@@ -33,8 +33,16 @@ import {
 	truncateLine,
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
+import {
+	createGitSafeDirectoryEntry,
+	GUEST_GIT_CONFIG,
+	GUEST_WORKSPACE,
+	resolveWorkspaceLayout,
+	toGuestPath,
+	toPosix,
+	type WorkspaceLayout,
+} from "./workspace.ts";
 
-const GUEST_WORKSPACE = "/workspace";
 const GUEST_PI_DOCUMENTATION = "/opt/pi-coding-agent";
 const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const DEFAULT_GREP_LIMIT = 100;
@@ -53,6 +61,8 @@ export interface GondolinAgentProfile {
 	provisionVm?(vm: VM): void | Promise<void>;
 	promptLines?: readonly string[];
 	displayName?: string;
+	/** Optional host mount root. Defaults to Pi's process CWD. */
+	resolveWorkspaceRoot?(): string | undefined;
 	/** False when startup selection was cancelled or failed. */
 	isEnabled?(): boolean;
 }
@@ -152,43 +162,14 @@ type TextToolResult<TDetails> = {
 	details: TDetails | undefined;
 };
 
-function stripAtPrefix(value: string): string {
-	return value.startsWith("@") ? value.slice(1) : value;
-}
-
-function toPosix(value: string): string {
-	return value.split(path.sep).join(path.posix.sep);
-}
-
-function isInsideHostPath(root: string, value: string): boolean {
-	const relativePath = path.relative(root, value);
-	return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
-}
-
-function hostPathToGuest(localCwd: string, hostPath: string): string {
-	const relativePath = path.relative(localCwd, hostPath);
-	if (!isInsideHostPath(localCwd, hostPath)) return toPosix(hostPath);
-	return relativePath ? path.posix.join(GUEST_WORKSPACE, toPosix(relativePath)) : GUEST_WORKSPACE;
-}
-
-function toGuestPath(localCwd: string, inputPath: string): string {
-	const trimmed = stripAtPrefix(inputPath.trim());
-	if (!trimmed) return GUEST_WORKSPACE;
-	if (path.isAbsolute(trimmed)) {
-		if (isInsideHostPath(localCwd, trimmed)) return hostPathToGuest(localCwd, trimmed);
-		return path.posix.resolve("/", toPosix(trimmed));
-	}
-	return path.posix.resolve(GUEST_WORKSPACE, toPosix(trimmed));
-}
-
-function createGondolinReadOps(vm: VM, localCwd: string): ReadOperations {
+function createGondolinReadOps(vm: VM, layout: WorkspaceLayout): ReadOperations {
 	return {
-		readFile: async (filePath) => vm.fs.readFile(toGuestPath(localCwd, filePath)),
+		readFile: async (filePath) => vm.fs.readFile(toGuestPath(layout, filePath)),
 		access: async (filePath) => {
-			await vm.fs.access(toGuestPath(localCwd, filePath));
+			await vm.fs.access(toGuestPath(layout, filePath));
 		},
 		detectImageMimeType: async (filePath) => {
-			const ext = path.posix.extname(toGuestPath(localCwd, filePath)).toLowerCase();
+			const ext = path.posix.extname(toGuestPath(layout, filePath)).toLowerCase();
 			if (ext === ".png") return "image/png";
 			if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
 			if (ext === ".gif") return "image/gif";
@@ -198,20 +179,20 @@ function createGondolinReadOps(vm: VM, localCwd: string): ReadOperations {
 	};
 }
 
-function createGondolinWriteOps(vm: VM, localCwd: string): WriteOperations {
+function createGondolinWriteOps(vm: VM, layout: WorkspaceLayout): WriteOperations {
 	return {
 		writeFile: async (filePath, content) => {
-			await vm.fs.writeFile(toGuestPath(localCwd, filePath), content, { encoding: "utf8" });
+			await vm.fs.writeFile(toGuestPath(layout, filePath), content, { encoding: "utf8" });
 		},
 		mkdir: async (dirPath) => {
-			await vm.fs.mkdir(toGuestPath(localCwd, dirPath), { recursive: true });
+			await vm.fs.mkdir(toGuestPath(layout, dirPath), { recursive: true });
 		},
 	};
 }
 
-function createGondolinEditOps(vm: VM, localCwd: string): EditOperations {
-	const readOps = createGondolinReadOps(vm, localCwd);
-	const writeOps = createGondolinWriteOps(vm, localCwd);
+function createGondolinEditOps(vm: VM, layout: WorkspaceLayout): EditOperations {
+	const readOps = createGondolinReadOps(vm, layout);
+	const writeOps = createGondolinWriteOps(vm, layout);
 	return {
 		readFile: readOps.readFile,
 		writeFile: writeOps.writeFile,
@@ -219,18 +200,18 @@ function createGondolinEditOps(vm: VM, localCwd: string): EditOperations {
 	};
 }
 
-function createGondolinLsOps(vm: VM, localCwd: string): LsOperations {
+function createGondolinLsOps(vm: VM, layout: WorkspaceLayout): LsOperations {
 	return {
 		exists: async (filePath) => {
 			try {
-				await vm.fs.access(toGuestPath(localCwd, filePath));
+				await vm.fs.access(toGuestPath(layout, filePath));
 				return true;
 			} catch {
 				return false;
 			}
 		},
-		stat: async (filePath) => vm.fs.stat(toGuestPath(localCwd, filePath)),
-		readdir: async (dirPath) => vm.fs.listDir(toGuestPath(localCwd, dirPath)),
+		stat: async (filePath) => vm.fs.stat(toGuestPath(layout, filePath)),
+		readdir: async (dirPath) => vm.fs.listDir(toGuestPath(layout, dirPath)),
 	};
 }
 
@@ -280,18 +261,18 @@ function matchesToolGlob(relativePath: string, pattern: string): boolean {
 	return path.posix.matchesGlob(path.posix.basename(relativePath), normalizedPattern);
 }
 
-function createGondolinFindOps(vm: VM, localCwd: string): FindOperations {
+function createGondolinFindOps(vm: VM, layout: WorkspaceLayout): FindOperations {
 	return {
 		exists: async (filePath) => {
 			try {
-				await vm.fs.access(toGuestPath(localCwd, filePath));
+				await vm.fs.access(toGuestPath(layout, filePath));
 				return true;
 			} catch {
 				return false;
 			}
 		},
 		glob: async (pattern, cwd, options) => {
-			const root = toGuestPath(localCwd, cwd);
+			const root = toGuestPath(layout, cwd);
 			const results: string[] = [];
 			await walkGuestFiles(vm, root, async (guestPath, relativePath) => {
 				if (results.length >= options.limit) return false;
@@ -338,11 +319,11 @@ function appendGrepBlock(params: {
 
 async function executeGondolinGrep(
 	vm: VM,
-	localCwd: string,
+	layout: WorkspaceLayout,
 	params: GrepToolInput,
 	signal?: AbortSignal,
 ): Promise<TextToolResult<GrepToolDetails>> {
-	const root = toGuestPath(localCwd, params.path ?? ".");
+	const root = toGuestPath(layout, params.path ?? ".");
 	const rootStat = await vm.fs.stat(root, { signal });
 	const rootIsDirectory = rootStat.isDirectory();
 	const matcher = createLineMatcher(params.pattern, params.literal, params.ignoreCase);
@@ -428,7 +409,7 @@ const GUEST_ENV_KEEP_EXACT = new Set([
 ]);
 const GUEST_ENV_KEEP_PREFIXES = ["PI_", "RTK_", "GIT_"];
 
-function buildGuestEnv(source: NodeJS.ProcessEnv | undefined, shellPath: string): Record<string, string> {
+export function buildGuestEnv(source: NodeJS.ProcessEnv | undefined, shellPath: string): Record<string, string> {
 	const result: Record<string, string> = {};
 	for (const [key, value] of Object.entries(source ?? {})) {
 		if (typeof value !== "string") continue;
@@ -436,6 +417,15 @@ function buildGuestEnv(source: NodeJS.ProcessEnv | undefined, shellPath: string)
 			result[key] = value;
 		}
 	}
+	// Do not let host Git configuration replace or supplement the exact guest
+	// safe.directory entry provisioned below. Strip both the legacy bare
+	// GIT_CONFIG variable and every GIT_CONFIG_* mechanism, then restore only the
+	// selector-owned global configuration path.
+	for (const key of Object.keys(result)) {
+		if (key === "GIT_CONFIG" || key.startsWith("GIT_CONFIG_")) delete result[key];
+	}
+	result.GIT_CONFIG_GLOBAL = GUEST_GIT_CONFIG;
+
 	// Guest-canonical identity and paths. The guest runs as root; pinning these
 	// keeps agent and interactive (`!`) shells identical regardless of what the
 	// host passed, and keeps per-user state (rtk, caches) in one place.
@@ -451,11 +441,33 @@ function buildGuestEnv(source: NodeJS.ProcessEnv | undefined, shellPath: string)
 	return result;
 }
 
-function createGondolinBashOps(vm: VM, localCwd: string, shellPath: string): BashOperations {
+async function configureGitSafeDirectory(vm: VM, guestProjectCwd: string): Promise<void> {
+	const entry = createGitSafeDirectoryEntry(guestProjectCwd);
+	let existing = "";
+	try {
+		existing = await vm.fs.readFile(GUEST_GIT_CONFIG, { encoding: "utf8" });
+	} catch (readError) {
+		try {
+			await vm.fs.access(GUEST_GIT_CONFIG);
+		} catch {
+			// The file does not exist in this disposable VM yet.
+			await vm.fs.mkdir(path.posix.dirname(GUEST_GIT_CONFIG), { recursive: true });
+			existing = "";
+			await vm.fs.writeFile(GUEST_GIT_CONFIG, entry, { encoding: "utf8" });
+			return;
+		}
+		throw readError;
+	}
+
+	const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+	await vm.fs.writeFile(GUEST_GIT_CONFIG, `${existing}${separator}${entry}`, { encoding: "utf8" });
+}
+
+function createGondolinBashOps(vm: VM, layout: WorkspaceLayout, shellPath: string): BashOperations {
 	return {
 		exec: async (command, cwd, { onData, signal, timeout, env }) => {
 			if (signal?.aborted) throw new Error("aborted");
-			const guestCwd = toGuestPath(localCwd, cwd);
+			const guestCwd = toGuestPath(layout, cwd);
 			const controller = new AbortController();
 			const onAbort = () => controller.abort();
 			signal?.addEventListener("abort", onAbort, { once: true });
@@ -498,21 +510,29 @@ function createGondolinBashOps(vm: VM, localCwd: string, shellPath: string): Bas
 }
 
 function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) {
-	const localCwd = process.cwd();
-	const localRead = createReadTool(localCwd);
-	const localWrite = createWriteTool(localCwd);
-	const localEdit = createEditTool(localCwd);
-	const localBash = createBashTool(localCwd);
+	const piHostCwd = process.cwd();
+	const localRead = createReadTool(piHostCwd);
+	const localWrite = createWriteTool(piHostCwd);
+	const localEdit = createEditTool(piHostCwd);
+	const localBash = createBashTool(piHostCwd);
 	const localUserBashOperations = createLocalBashOperations();
-	const localGrep = createGrepTool(localCwd);
-	const localFind = createFindTool(localCwd);
-	const localLs = createLsTool(localCwd);
+	const localGrep = createGrepTool(piHostCwd);
+	const localFind = createFindTool(piHostCwd);
+	const localLs = createLsTool(piHostCwd);
 	const piPackageRoot = resolvePiPackageRoot();
 
 	let vm: VM | undefined;
 	let vmStarting: Promise<VM> | undefined;
+	let workspaceLayout: WorkspaceLayout | undefined;
 	let shellPath = "/bin/sh";
 	let activeReadonlyMounts: GondolinReadonlyMount[] = [];
+
+	function getWorkspaceLayout(): WorkspaceLayout {
+		if (!workspaceLayout) {
+			workspaceLayout = resolveWorkspaceLayout(piHostCwd, profile.resolveWorkspaceRoot?.());
+		}
+		return workspaceLayout;
+	}
 
 	async function startVm(ctx?: ExtensionContext): Promise<VM> {
 		if (profile.isEnabled && !profile.isEnabled()) throw new Error("No Gondolin image selected");
@@ -521,10 +541,11 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		let created: VM | undefined;
 
 		try {
+			const layout = getWorkspaceLayout();
 			await profile.validateHostResources?.();
 			const readonlyMounts = normalizeReadonlyMounts(profile.readonlyMounts ?? []);
 			const vfsMounts = {
-				[GUEST_WORKSPACE]: new RealFSProvider(localCwd),
+				[GUEST_WORKSPACE]: new RealFSProvider(layout.hostWorkspaceRoot),
 				[GUEST_PI_DOCUMENTATION]: new ReadonlyProvider(new RealFSProvider(piPackageRoot)),
 			} as Record<string, RealFSProvider | ReadonlyProvider>;
 			for (const mount of readonlyMounts) {
@@ -532,7 +553,7 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 			}
 			created = await VM.create({
 				...profile.vmOptions,
-				sessionLabel: `pi ${path.basename(localCwd)}`,
+				sessionLabel: `pi ${path.basename(layout.hostProjectCwd)}`,
 				sandbox: {
 					imagePath: profile.resolveImagePath(),
 				},
@@ -540,6 +561,7 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 			});
 			activeReadonlyMounts = readonlyMounts;
 			await profile.provisionVm?.(created);
+			await configureGitSafeDirectory(created, layout.guestProjectCwd);
 			for (const requiredPath of ["README.md", "docs", "examples"]) {
 				await created.fs.access(path.posix.join(GUEST_PI_DOCUMENTATION, requiredPath));
 			}
@@ -548,11 +570,12 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 			vm = created;
 			ctx?.ui.setStatus(
 				"gondolin",
-				ctx.ui.theme.fg("accent", `Gondolin: ${created.id.slice(0, 8)} (${GUEST_WORKSPACE})`),
+				ctx.ui.theme.fg("accent", `Gondolin: ${created.id.slice(0, 8)} (${layout.guestProjectCwd})`),
 			);
 			const mountMessage = readonlyMounts.length > 0 ? `; profile mounts: ${readonlyMounts.length} (read-only)` : "";
 			ctx?.ui.notify(
-				`Gondolin VM ready. Workspace: ${GUEST_WORKSPACE}; Pi documentation: ${GUEST_PI_DOCUMENTATION} (read-only)${mountMessage}.`,
+				`Gondolin VM ready. CWD: ${layout.guestProjectCwd}; workspace mount: ${GUEST_WORKSPACE}; ` +
+					`Pi documentation: ${GUEST_PI_DOCUMENTATION} (read-only)${mountMessage}.`,
 				"info",
 			);
 			return created;
@@ -603,6 +626,7 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		const activeVm = vm;
 		vm = undefined;
 		vmStarting = undefined;
+		workspaceLayout = undefined;
 		activeReadonlyMounts = [];
 		if (!activeVm) {
 			ctx.ui.setStatus("gondolin", undefined);
@@ -620,12 +644,16 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		description: "Show Gondolin VM status",
 		handler: async (_args, ctx) => {
 			const activeVm = await ensureVm(ctx);
+			const layout = getWorkspaceLayout();
 			ctx.ui.notify(
 				[
 					`Gondolin VM: ${activeVm.id}`,
 					...(profile.displayName ? [`Image: ${profile.displayName}`] : []),
-					`Host workspace: ${localCwd}`,
-					`Guest workspace: ${GUEST_WORKSPACE}`,
+					`Host project CWD: ${layout.hostProjectCwd}`,
+					`Host workspace mount: ${layout.hostWorkspaceRoot}`,
+					`Guest project CWD: ${layout.guestProjectCwd}`,
+					`Guest workspace mount: ${GUEST_WORKSPACE}`,
+					`Git safe.directory: ${layout.guestProjectCwd} (${GUEST_GIT_CONFIG})`,
 					`Pi documentation: ${GUEST_PI_DOCUMENTATION} (read-only; host: ${piPackageRoot})`,
 					...activeReadonlyMounts.map(
 						({ hostPath, guestPath }) => `Profile mount: ${guestPath} (read-only; host: ${hostPath})`,
@@ -641,8 +669,9 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		...localRead,
 		async execute(id, params, signal, onUpdate, ctx) {
 			const activeVm = await ensureVm(ctx);
-			const tool = createReadTool(GUEST_WORKSPACE, {
-				operations: createGondolinReadOps(activeVm, localCwd),
+			const layout = getWorkspaceLayout();
+			const tool = createReadTool(layout.guestProjectCwd, {
+				operations: createGondolinReadOps(activeVm, layout),
 			});
 			return tool.execute(id, params, signal, onUpdate);
 		},
@@ -652,8 +681,9 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		...localWrite,
 		async execute(id, params, signal, onUpdate, ctx) {
 			const activeVm = await ensureVm(ctx);
-			const tool = createWriteTool(GUEST_WORKSPACE, {
-				operations: createGondolinWriteOps(activeVm, localCwd),
+			const layout = getWorkspaceLayout();
+			const tool = createWriteTool(layout.guestProjectCwd, {
+				operations: createGondolinWriteOps(activeVm, layout),
 			});
 			return tool.execute(id, params, signal, onUpdate);
 		},
@@ -663,8 +693,9 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		...localEdit,
 		async execute(id, params, signal, onUpdate, ctx) {
 			const activeVm = await ensureVm(ctx);
-			const tool = createEditTool(GUEST_WORKSPACE, {
-				operations: createGondolinEditOps(activeVm, localCwd),
+			const layout = getWorkspaceLayout();
+			const tool = createEditTool(layout.guestProjectCwd, {
+				operations: createGondolinEditOps(activeVm, layout),
 			});
 			return tool.execute(id, params, signal, onUpdate);
 		},
@@ -674,8 +705,9 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		...localBash,
 		async execute(id, params, signal, onUpdate, ctx) {
 			const activeVm = await ensureVm(ctx);
-			const tool = createBashTool(GUEST_WORKSPACE, {
-				operations: createGondolinBashOps(activeVm, localCwd, shellPath),
+			const layout = getWorkspaceLayout();
+			const tool = createBashTool(layout.guestProjectCwd, {
+				operations: createGondolinBashOps(activeVm, layout, shellPath),
 			});
 			return tool.execute(id, params, signal, onUpdate);
 		},
@@ -685,8 +717,9 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		...localLs,
 		async execute(id, params, signal, onUpdate, ctx) {
 			const activeVm = await ensureVm(ctx);
-			const tool = createLsTool(GUEST_WORKSPACE, {
-				operations: createGondolinLsOps(activeVm, localCwd),
+			const layout = getWorkspaceLayout();
+			const tool = createLsTool(layout.guestProjectCwd, {
+				operations: createGondolinLsOps(activeVm, layout),
 			});
 			return tool.execute(id, params, signal, onUpdate);
 		},
@@ -696,8 +729,9 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		...localFind,
 		async execute(id, params, signal, onUpdate, ctx) {
 			const activeVm = await ensureVm(ctx);
-			const tool = createFindTool(GUEST_WORKSPACE, {
-				operations: createGondolinFindOps(activeVm, localCwd),
+			const layout = getWorkspaceLayout();
+			const tool = createFindTool(layout.guestProjectCwd, {
+				operations: createGondolinFindOps(activeVm, layout),
 			});
 			return tool.execute(id, params, signal, onUpdate);
 		},
@@ -707,7 +741,7 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		...localGrep,
 		async execute(_id, params, signal, _onUpdate, ctx) {
 			const activeVm = await ensureVm(ctx);
-			return executeGondolinGrep(activeVm, localCwd, params, signal);
+			return executeGondolinGrep(activeVm, getWorkspaceLayout(), params, signal);
 		},
 	});
 
@@ -726,14 +760,17 @@ function registerGondolinAgent(pi: ExtensionAPI, profile: GondolinAgentProfile) 
 		}
 
 		const activeVm = await ensureVm(ctx);
-		return { operations: createGondolinBashOps(activeVm, localCwd, shellPath) };
+		return { operations: createGondolinBashOps(activeVm, getWorkspaceLayout(), shellPath) };
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (profile.isEnabled && !profile.isEnabled()) return;
 		await ensureVm(ctx);
-		const localLine = `Current working directory: ${localCwd}`;
-		const guestLine = `Current working directory: ${GUEST_WORKSPACE} (Gondolin VM; host workspace mounted from ${localCwd})`;
+		const layout = getWorkspaceLayout();
+		const localLine = `Current working directory: ${piHostCwd}`;
+		const guestLine =
+			`Current working directory: ${layout.guestProjectCwd} ` +
+			`(Gondolin VM; host workspace mounted from ${layout.hostWorkspaceRoot})`;
 		let systemPrompt = event.systemPrompt.includes(localLine)
 			? event.systemPrompt.replace(localLine, guestLine)
 			: `${event.systemPrompt}\n\n${guestLine}`;
